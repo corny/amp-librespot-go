@@ -112,11 +112,15 @@ func startSession(host task.Context) (respot.Session, error) {
 		login.AuthToken = ""
 
 		if login.Password == "" && login.AuthToken == "" {
-			client_id := os.Getenv("SPOTIFY_CLIENT_ID")
-			client_secret := os.Getenv("SPOTIFY_CLIENT_SECRET")
+			config := oauth.Config{
+				ClientId:     os.Getenv("SPOTIFY_CLIENT_ID"),
+				ClientSecret: os.Getenv("SPOTIFY_CLIENT_SECRET"),
+				RedirectURI:  "http://localhost:5000/callback",
+			}
 
 			var err error
-			login.AuthToken, err = oauth.LoginOAuth(client_id, client_secret, "http://localhost:5000/callback")
+			tokens, err := config.SignIn()
+			login.AuthToken = tokens.AccessToken
 			if err != nil {
 				return nil, err
 			}

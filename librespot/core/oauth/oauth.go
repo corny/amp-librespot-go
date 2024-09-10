@@ -4,77 +4,95 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"time"
 )
 
-type OAuth struct {
+const (
+	authorizeEndpoint = "https://accounts.spotify.com/authorize"
+	tokenEndpoint     = "https://accounts.spotify.com/api/token"
+)
+
+type Result struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
 	Scope        string `json:"scope"`
-	
-	// Expiry is the optional expiration time of the access token.
+	Error        string `json:"error"`
+
+	// ExpiresIn is the optional expiration duration of the access token in seconds.
 	//
 	// If zero, TokenSource implementations will reuse the same
 	// token forever and RefreshToken or equivalent
 	// mechanisms for that TokenSource will not be used.
-	//Expiry time.Time `json:"expiry,omitempty"`
-
-
-	Error        string
+	ExpiresIn uint `json:"expires_in"`
 }
 
-
-// Login to Spotify using the OAuth method
-func LoginOAuth(clientId, clientSecret, callbackURL string) (string, error) {
-	if callbackURL == "" {
-		callbackURL = "http://localhost:8888/callback"
-	}
-	token, err := getOAuthToken(clientId, clientSecret, callbackURL)
-	if err != nil {
-		return "", err
-	}
-	tok := token.AccessToken
-	fmt.Println("Got oauth token:\n", tok)
-	return tok, nil
+type Config struct {
+	ClientSecret string
+	ClientId     string
+	RedirectURI  string
 }
 
-func GetOauthAccessToken(code string, redirectUri string, clientId string, clientSecret string) (*OAuth, error) {
+func (config *Config) GetTokens(code string) (*Result, error) {
 	val := url.Values{}
+	val.Set("client_id", config.ClientId)
+	val.Set("client_secret", config.ClientSecret)
+	val.Set("redirect_uri", config.RedirectURI)
 	val.Set("grant_type", "authorization_code")
 	val.Set("code", code)
-	val.Set("redirect_uri", redirectUri)
-	val.Set("client_id", clientId)
-	val.Set("client_secret", clientSecret)
 
-	resp, err := http.PostForm("https://accounts.spotify.com/api/token", val)
+	return config.requestToken(val)
+}
+
+func (config *Config) RefreshAccessToken(refreshToken string) (*Result, error) {
+	val := url.Values{}
+	val.Set("client_id", config.ClientId)
+	val.Set("client_secret", config.ClientSecret)
+	val.Set("grant_type", "refresh_token")
+	val.Set("refresh_token", refreshToken)
+
+	return config.requestToken(val)
+}
+
+func (config *Config) requestToken(values url.Values) (*Result, error) {
+	resp, err := http.PostForm(tokenEndpoint, values)
 	if err != nil {
 		// Retry since there is an nginx bug that causes http2 streams to get
 		// an initial REFUSED_STREAM response
 		// https://github.com/curl/curl/issues/804
-		resp, err = http.PostForm("https://accounts.spotify.com/api/token", val)
+		resp, err = http.PostForm(tokenEndpoint, values)
 		if err != nil {
 			return nil, err
 		}
 	}
 	defer resp.Body.Close()
-	auth := OAuth{}
-	body, err := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("unexpected status code %d", resp.StatusCode)
+	}
+
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		return nil, fmt.Errorf("unexpected status content type %s", ct)
+	}
+
+	result := &Result{}
+
+	decoder := json.NewDecoder(resp.Body)
+	decoder.DisallowUnknownFields()
+	err = decoder.Decode(result)
+
 	if err != nil {
 		return nil, err
 	}
-	err = json.Unmarshal(body, &auth)
-	fmt.Printf("auth:\n%+v\n", auth)
-	if err != nil {
-		return nil, err
+
+	if result.Error != "" {
+		return nil, fmt.Errorf("error getting token %v", result.Error)
 	}
-	if auth.Error != "" {
-		return nil, fmt.Errorf("error getting token %v", auth.Error)
-	}
-	return &auth, nil
+
+	return result, nil
 }
 
 /*
@@ -117,18 +135,21 @@ func StartLocalOAuthServer(clientId string, clientSecret string, callback string
 }
 */
 
+func (config *Config) AuthorizeURL() string {
+	val := url.Values{}
+	val.Set("client_id", config.ClientId)
+	val.Set("response_type", "code")
+	val.Set("redirect_uri", config.RedirectURI)
+	val.Set("scope", "streaming")
 
-func getOAuthToken(clientId string, clientSecret string, callback string) (*OAuth, error) {
-	ch := make(chan *OAuth)
+	return authorizeEndpoint + "?" + val.Encode()
+}
 
-	fmt.Println("go to this url")
-	urlPath := "https://accounts.spotify.com/authorize?" +
-		"client_id=" + clientId +
-		"&response_type=code" +
-		"&redirect_uri=" + callback +
-		"&scope=streaming"
-	fmt.Println(urlPath)
-	
+func (config *Config) SignIn() (*Result, error) {
+	ch := make(chan *Result)
+
+	fmt.Println("Go to this URL:", config.AuthorizeURL())
+
 	// router := http.NewServeMux()
 	// server := &http.Server{
 	// 	// TODO pull port from callback
@@ -137,14 +158,14 @@ func getOAuthToken(clientId string, clientSecret string, callback string) (*OAut
 	// }
 	http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		params := r.URL.Query()
-		auth, err := GetOauthAccessToken(params.Get("code"), callback, clientId, clientSecret)
+		auth, err := config.GetTokens(params.Get("code"))
 		if err != nil {
 			fmt.Fprintf(w, "Error getting token %q", err)
-			return 
+			return
 		}
 		fmt.Fprintf(w, "Got token, loggin in")
 		ch <- auth
-		
+
 		// time.Sleep(time.Second * 1)
 		// _ = server.Shutdown(context.Background())
 	})
@@ -152,14 +173,12 @@ func getOAuthToken(clientId string, clientSecret string, callback string) (*OAut
 	go func() {
 		log.Fatal(http.ListenAndServe(":5000", nil))
 	}()
-	
-		// Wait then bail
+
+	// Wait then bail
 	select {
 	case <-time.After(time.Second * 60):
 		return nil, errors.New("timed out waiting for auth")
 	case validAuth := <-ch:
-			return validAuth, nil
+		return validAuth, nil
 	}
-
-
 }

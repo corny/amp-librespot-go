@@ -67,10 +67,17 @@ func mainStart() error {
 
 		if login.Password == "" && login.AuthToken == "" {
 			var err error
-			login.AuthToken, err = oauth.LoginOAuth(os.Getenv("client_id"), os.Getenv("client_secret"), os.Getenv("redirect_uri"))
+			config := oauth.Config{
+				ClientId:     os.Getenv("client_id"),
+				ClientSecret: os.Getenv("client_secret"),
+				RedirectURI:  os.Getenv("redirect_uri"),
+			}
+			tokens, err := config.SignIn()
 			if err != nil {
 				return err
 			}
+
+			login.AuthToken = tokens.AccessToken
 		}
 
 		err = sess.Login()
